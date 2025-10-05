@@ -20,10 +20,22 @@ class Utils:
         pass
 
     @staticmethod
-    def update_data_clock_in_log(id_local_process, type_event, clock, data_clock_path):
+    def update_event_counter(event_counter,id_process):
+        event_counter[id_process] += 1
+    @staticmethod
+    def update_data_clock_in_log(event_counter, id_local_process, type_event, clock, data_clock_path,peer_id):
         try:
+
+            type_map = {
+                TypeEvent.Local_event: "Evento local",
+                TypeEvent.Sent_message: f"Enviou para [{peer_id}]" if peer_id is not None else "Enviou mensagem",
+                TypeEvent.Receive_message: f"Recebeu de [{peer_id}]" if peer_id is not None else "Recebeu mensagem"
+            }
+
+            log_text = f"[P{id_local_process+1}-E{event_counter[id_local_process]}] {type_map[type_event]} → {clock}\n"
+
             with open(data_clock_path, 'a') as file:
-                file.write(f"p[{id_local_process}] > {type_event.name} > {clock}\n")
+                file.write(log_text)
         except FileNotFoundError as e:
             raise e
     @staticmethod    
@@ -47,12 +59,13 @@ class TalkServer(Talk_pb2_grpc.SpeakxServiceServicer):
         This class received a greet from a client and a vetorial clock
         As response, this, push a 'hello, i received your greeting'
     """
-    def __init__(self, data_clock_path, server_clock, id_server_clock):
+    def __init__(self, data_clock_path, server_clock, id_server_clock,event_counter):
         self.data_clock_path = data_clock_path
         self.local_clock = server_clock
         self.id_server_clock = id_server_clock
         self.utils = Utils()
         self._lock = threading.Lock()
+        self.event_counter = event_counter
         super().__init__()
 
     def Talk(self, request, context):
@@ -61,11 +74,13 @@ class TalkServer(Talk_pb2_grpc.SpeakxServiceServicer):
             speak = request.speak
             received_clock = list(request.vectorClock)
             peer = context.peer()
+            
         
             print(f"Message received from {peer}: '{speak}'")
             print(f"Clock from {peer}: {received_clock}")
 
             with self._lock:
+                Utils.update_event_counter(event_counter=self.event_counter, id_process=self.id_server_clock)
                 # update server clock
                 self.utils.updateClock_vector(self.local_clock, self.id_server_clock, received_clock)
 
@@ -74,10 +89,11 @@ class TalkServer(Talk_pb2_grpc.SpeakxServiceServicer):
                     id_local_process=self.id_server_clock,
                     type_event=TypeEvent.Receive_message,
                     clock=self.local_clock,
-                    data_clock_path=self.data_clock_path
+                    data_clock_path=self.data_clock_path,
+                    peer_id=peer,
+                    event_counter=self.event_counter
                 )
 
-            print(f"server clock updated: {self.local_clock}")
 
             # assembly response 
             response = Talk_pb2.ResponseGreeting(
@@ -87,6 +103,8 @@ class TalkServer(Talk_pb2_grpc.SpeakxServiceServicer):
 
 
             with self._lock:
+                Utils.update_event_counter(event_counter=self.event_counter, id_process=self.id_server_clock)
+
                 # update server clock
                 self.local_clock[self.id_server_clock] += 1
 
@@ -95,7 +113,9 @@ class TalkServer(Talk_pb2_grpc.SpeakxServiceServicer):
                     id_local_process=self.id_server_clock,
                     type_event=TypeEvent.Sent_message,
                     clock=self.local_clock,
-                    data_clock_path=self.data_clock_path
+                    data_clock_path=self.data_clock_path,
+                    peer_id=peer,
+                    event_counter=self.event_counter
                 )
 
 
@@ -111,7 +131,7 @@ class TalkServer(Talk_pb2_grpc.SpeakxServiceServicer):
    
   
 class TalkClient():
-    def __init__(self,data_clock_path, client_clock, id_client_process,host="localhost", port=5051):
+    def __init__(self,data_clock_path, client_clock, id_client_process, event_counter,host="localhost", port=5051):
         self.host = host
         self.port = port
         self.data_clock_path = data_clock_path
@@ -119,6 +139,7 @@ class TalkClient():
         self.id_client_process = id_client_process
         self.utils = Utils()
         self._lock = threading.Lock()
+        self.event_counter = event_counter
         channel = grpc.insecure_channel(f'{host}:{port}')
         self.stub = Talk_pb2_grpc.SpeakxServiceStub(channel)
 
@@ -126,13 +147,17 @@ class TalkClient():
 
     def send_greeting(self, speak):
         try:
+            peer = f"P{self.port}"
             with self._lock:
+                Utils.update_event_counter(event_counter=self.event_counter, id_process=self.id_client_process)
                 self.client_clock[self.id_client_process] += 1
                 Utils.update_data_clock_in_log(
                     id_local_process = self.id_client_process,
                     type_event = TypeEvent.Sent_message,
                     clock = self.client_clock,
-                    data_clock_path  = self.data_clock_path)
+                    peer_id=peer,
+                    data_clock_path  = self.data_clock_path,
+                    event_counter=self.event_counter)
             # assemble request
             request = Talk_pb2.Greeting(
                 speak=speak,
@@ -142,6 +167,8 @@ class TalkClient():
             response =  self.stub.Talk(request)
 
             with self._lock:
+                Utils.update_event_counter(event_counter=self.event_counter, id_process=self.id_client_process)
+
                 Utils.updateClock_vector(
                     local_clock = self.client_clock,
                     id_local_process = self.id_client_process,
@@ -152,7 +179,9 @@ class TalkClient():
                     id_local_process = self.id_client_process,
                     type_event = TypeEvent.Receive_message,
                     clock = self.client_clock,
-                    data_clock_path  = self.data_clock_path)
+                    peer_id=peer,
+                    data_clock_path  = self.data_clock_path,
+                    event_counter=self.event_counter)
             
             return response.speak, list(response.vectorClock)
         except grpc.RpcError as e:
@@ -163,7 +192,7 @@ class TalkClient():
 
 
 
-def eventCliente(host, ports, data_clock_path, client_clock, id_client_process):
+def eventCliente(host, ports, data_clock_path, client_clock, id_client_process,event_counter):
     lock = threading.Lock()
     
 
@@ -179,35 +208,46 @@ def eventCliente(host, ports, data_clock_path, client_clock, id_client_process):
             client_clock=client_clock,
             id_client_process=id_client_process,
             host=host,
-            port=ports[port_idx]
+            port=ports[port_idx],
+            event_counter=event_counter
         )
         with lock:
              Utils.update_data_clock_in_log(
                 id_local_process = id_client_process,
                 type_event= TypeEvent.Local_event,
                 clock = client_clock,
-                data_clock_path = data_clock_path)
+                data_clock_path = data_clock_path,
+                event_counter=event_counter,
+                peer_id=ports[port_idx]
+
+                )
 
 
         time.sleep(3)
 
 
         soma = 2 + 3
+        with lock:
+            Utils.update_event_counter(id_process=id_client_process, event_counter=event_counter)
         client_clock[id_client_process] += 1
 
         with lock:
             Utils.update_data_clock_in_log(
                 id_local_process = id_client_process,
+                peer_id=ports[id_client_process],
                 type_event= TypeEvent.Local_event,
                 clock = client_clock,
-                data_clock_path = data_clock_path)
+                data_clock_path = data_clock_path,
+                event_counter=event_counter
+                ),
+
 
         time.sleep(5)
 
         client.send_greeting(f"hello")
 
 
-def Server(host, port, data_clock_path, server_clock, id_server_clock):
+def Server(host, port, data_clock_path, server_clock, id_server_clock, event_counter):
     """
 
     Args:
@@ -222,7 +262,7 @@ def Server(host, port, data_clock_path, server_clock, id_server_clock):
 
 
         # Register the service implementation
-        servicer = TalkServer(data_clock_path, server_clock, id_server_clock)
+        servicer = TalkServer(data_clock_path, server_clock, id_server_clock,event_counter)
         Talk_pb2_grpc.add_SpeakxServiceServicer_to_server(servicer, server)
 
         # Bind server to the given host and port
@@ -245,6 +285,7 @@ def Server(host, port, data_clock_path, server_clock, id_server_clock):
 
 if __name__ == "__main__":
     process = [[0,0,0,0] for _ in range(4)]
+    event_counter = [0 for _ in range(len(process))]
 
     log_base = os.path.join(os.path.abspath(os.path.dirname(__file__)), 'log_clock')
     os.makedirs(log_base, exist_ok=True)
@@ -260,7 +301,8 @@ if __name__ == "__main__":
                 "port": ports[idx],
                 "data_clock_path": full_path_log[idx],
                 "server_clock": process[idx],
-                "id_server_clock": idx
+                "id_server_clock": idx,
+                "event_counter":event_counter
             },
             daemon=True
         )
@@ -280,7 +322,8 @@ if __name__ == "__main__":
                 "ports" :ports,
                 "data_clock_path" :full_path_log[idx],
                 "id_client_process" : idx,
-                "client_clock" : process[idx]
+                "client_clock" : process[idx],
+                "event_counter":event_counter
             },
             daemon=True
         )
