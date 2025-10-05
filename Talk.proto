@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package Talk;
+
+message Greeting {
+    string speak = 1;
+    repeated int32 vectorClock = 2;
+}
+
+// result message
+message ResponseGreeting {
+    string speak = 1;
+    repeated int32 vectorClock= 2;
+}
+
+// service to expose a remote method
+service SpeakxService {
+    rpc Talk(Greeting) returns (ResponseGreeting);
+}
+
+//    python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. talk.proto
